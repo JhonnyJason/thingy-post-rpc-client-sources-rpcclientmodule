@@ -1,8 +1,8 @@
-############################################################
-#region debug
-import { createLogFunctions } from "thingy-debug"
-{log, olog} = createLogFunctions("rpcpostclient")
-#endregion
+# ############################################################
+# #region debug
+# import { createLogFunctions } from "thingy-debug"
+# {log, olog} = createLogFunctions("rpcpostclient")
+# #endregion
 
 ############################################################
 #region imports
