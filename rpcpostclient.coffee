@@ -334,7 +334,7 @@ establishSimpleTokenSession = (c) ->
     
 #     specificContext = "implicit #{c.name}@#{timestamp}"
 #     context = "#{specificContext}:#{serverContext}_#{timestamp}"
-#     seedHex = await secUtl.createSharedSecretHashHex(c.secretKeyHex, c.serverId, context)
+#     seedHex = await secUtl.diffieHellmanSecretHashHex(c.secretKeyHex, c.serverId, context)
 #     return await sess.createAuthCode(seedHex, specificContext)
 
 # generateImplicitAuthCodeSeed = (c) ->
@@ -343,13 +343,13 @@ establishSimpleTokenSession = (c) ->
     
 #     specificContext = "implicit #{c.name}@#{timestamp}"
 #     context = "#{specificContext}:#{serverContext}_#{timestamp}"
-#     return await secUtl.createSharedSecretHashHex(c.secretKeyHex, c.serverId, context)
+#     return await secUtl.diffieHellmanSecretHashHex(c.secretKeyHex, c.serverId, context)
 
 generateExplicitAuthCodeSeed = (timestamp, c) ->
     serverContext = c.serverContext
     specificContext = c.name
     context = "#{specificContext}:#{serverContext}_#{timestamp}"
-    return await secUtl.createSharedSecretHashHex(c.secretKeyHex, c.serverId, context)
+    return await secUtl.diffieHellmanSecretHashHex(c.secretKeyHex, c.serverId, context)
 
 getExplicitSimpleToken = (c) ->
     return startSessionExplicitly("tokenSimple", c)
