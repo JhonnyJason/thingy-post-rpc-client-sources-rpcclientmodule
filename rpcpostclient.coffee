@@ -8,7 +8,6 @@
 #region imports
 import * as secUtl from "secret-manager-crypto-utils"
 import * as validatableStamp from "validatabletimestamp"
-# import * as tbut from "thingy-byte-utils"
 import * as sess from "thingy-session-utils"
 
 import {
@@ -20,8 +19,7 @@ import {
 ############################################################
 TOKEN_SIMPLE = 0
 TOKEN_UNIQUE = 1
-AUTHCODE_LIGHT = 2
-AUTHCODE_SHA2 = 3
+AUTHCODE_SHA2 = 2
 
 ############################################################
 export class RPCPostClient
@@ -76,7 +74,6 @@ export class RPCPostClient
             when "publicAccess" then return doPublicAccessRPC(func, args, this)
             when "tokenSimple" then return doTokenSimpleRPC(func, args, this)
             when "tokenUnique" then return doTokenUniqueRPC(func, args, this)
-            when "authCodeLight" then return doAuthCodeLightRPC(func, args, this)
             when "authCodeSHA2" then return doAuthCodeSHA2RPC(func, args, this)
             when "signature", "clientSignature", "masterSignature"
                 return doSignatureRPC(func, args, authType, this)
@@ -252,13 +249,6 @@ doTokenUniqueRPC  = (func, args, c) ->
 
     return
 
-doAuthCodeLightRPC = (func, args, c) ->
-    throw new Error("doAuthCodeLightRPC: Not Implemented yet!")
-    # await establishAuthCodeLightSession(c)    
-    # incRequestId(c)
-
-    return
-
 doAuthCodeSHA2RPC = (func, args, c) ->
     await establishSHA2AuthCodeSession(c)    
     incRequestId(c)
@@ -312,7 +302,6 @@ startSessionExplicitly = (type, c) ->
     catch err then throw new Error("Explicit Start failed: #{err.message}")
     return
 
-
 establishSimpleTokenSession = (c) ->
     if c.sessions[TOKEN_SIMPLE]? and c.sessions[TOKEN_SIMPLE].token? then return
     try
@@ -327,23 +316,6 @@ establishSimpleTokenSession = (c) ->
         message = "Could not establish a simple Token session! Details: #{err.message}"
         throw new Error(message)
     return
-
-# generateImplicitSimpleToken = (c) ->
-#     serverContext = c.serverContext
-#     timestamp = validatableStamp.create()
-    
-#     specificContext = "implicit #{c.name}@#{timestamp}"
-#     context = "#{specificContext}:#{serverContext}_#{timestamp}"
-#     seedHex = await secUtl.diffieHellmanSecretHashHex(c.secretKeyHex, c.serverId, context)
-#     return await sess.createAuthCode(seedHex, specificContext)
-
-# generateImplicitAuthCodeSeed = (c) ->
-#     serverContext = c.serverContext
-#     timestamp = validatableStamp.create()
-    
-#     specificContext = "implicit #{c.name}@#{timestamp}"
-#     context = "#{specificContext}:#{serverContext}_#{timestamp}"
-#     return await secUtl.diffieHellmanSecretHashHex(c.secretKeyHex, c.serverId, context)
 
 generateExplicitAuthCodeSeed = (timestamp, c) ->
     serverContext = c.serverContext
@@ -447,35 +419,6 @@ authenticateServiceAuthCodeSHA2 = (response, ourRequestId, ourServerId, c) ->
         if authCode != responseAuthCode then throw new Error("AuthCodes did not Match!")
     catch err then throw new ResponseAuthError("authenticateServiceAuthCodeSHA2: #{err.message}")
     return
-
-authenticateServiceAuthCodeLight = (response, ourRequestId, ourServerId, c) ->
-    try
-        responseAuthCode = response.auth.responseAuthCode
-        timestamp = response.auth.timestamp
-        requestId = response.auth.requestId
-        serverId = response.auth.serverId
-        
-        if !responseAuthCode? then throw new Error("No ResponseAuthCode!")
-        if !timestamp? then throw new Error("No Timestamp!")
-        if !requestId? then throw new Error("No RequestId!")
-        if !serverId? then throw new Error("No ServerId!")
-        
-        if requestId != ourRequestId then throw new Error("RequestId Mismatch!")
-        if serverId != ourServerId then throw new Error("ServerId Mismatch!")
-        
-        validatableStamp.assertValidity(timestamp)
-        
-        session = c.sessions[AUTHCODE_Light]
-        if !session? or !session.seedHex? then throw new Error("Local session object has become invalid!")
-        response.auth.requestAuthCode = ""
-        responseString = JSON.stringify(response)
-
-        throw new Error("Not implemented yet!")
-        # authCode = await sess.createAuthCodeLight(session.seedHex, requestString)
-        if authCode != responseAuthCode then throw new Error("AuthCodes did not Match!")
-    catch err then throw new ResponseAuthError("authenticateServiceAuthCodeLight: #{err.message}")
-    return
-
 
 #endregion
 
