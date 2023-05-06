@@ -9,6 +9,8 @@
 import * as secUtl from "secret-manager-crypto-utils"
 import * as validatableStamp from "validatabletimestamp"
 import * as sess from "thingy-session-utils"
+import * as tbut from "thingy-byte-utils"
+import { FRAESC as Generator } from "feistelled-reduced-aes-core"
 
 import {
     NOT_AUTHORIZED, NetworkError, ResponseAuthError, RPCError 
@@ -58,7 +60,7 @@ export class RPCPostClient
     ########################################################
     getServerURL: -> @serverURL
     getServerId: ->
-        if !@serverId? then @serverId = await getValidatedNodeId(this)
+        if !@serverId? then await @requestNodeId("none")
         return @serverId
 
     getSecretKey: -> @secretKeyHex
@@ -68,6 +70,8 @@ export class RPCPostClient
 
     ########################################################
     doRPC: (func, args, authType) ->
+        if @requestingNodeId && func != "getNodeId" then throw new Error("Cannot do regular RPCs while requesting NodeId!")
+
         switch authType
             when "none" then return doNoAuthRPC(func, args, this)
             when "anonymous" then return  doAnonymousRPC(func, args, this)
@@ -79,7 +83,17 @@ export class RPCPostClient
                 return doSignatureRPC(func, args, authType, this)
             else throw new Error("doRPC: Unknown authType! '#{authType}'")
         return
-    
+
+    ########################################################
+    requestNodeId: (authType) ->
+        @requestingNodeId = true
+        func = "getNodeId"
+        args =  {} 
+        try await @doRPC(func, args, authType)
+        finally 
+            @requestingNodeId = false
+        return
+
 ########################################################
 #region internal functions
 
@@ -102,13 +116,13 @@ postRPCString = (url, requestString) ->
         return await response.json()
     catch err
         baseMsg = "Error! RPC could not receive a JSON response!"
-        
-        try 
-            bodyText = "Body:  #{await response.text()}"
+        statusText = "No http-status could be provided!"        
+        try
             statusText = "HTTP-Status: #{response.status}"
+            bodyText = "Body:  #{await response.text()}"
         catch err2
             details = "No response could be retrieved! details: #{err.message}"
-            errorMsg = "#{baseMsg} #{details}" 
+            errorMsg = "#{baseMsg} #{statusText} #{details}" 
             throw new NetworkError(errorMsg)
 
         details = "#{statusText} #{bodyText}"
@@ -123,6 +137,27 @@ incRequestId = (c) ->
 
 ########################################################
 #region RPC execution functions
+
+########################################################
+extractServerId = (response) ->
+    result = response.result
+
+    if typeof result == "object" and result.serverNodeId?
+        validatableStamp.assertValidity(result.timestamp)
+
+        nodeId = result.serverNodeId
+        sig = result.signature
+        result.signature = ""
+        content = JSON.stringify(result)
+        verified = await secUtl.verify(sig, nodeId, content)
+        if !verified then throw new Error("ServerId validation Failed: Invalid Signature!")
+
+        return nodeId
+
+    if response.auth? and response.auth.serverId?
+        return response.auth.serverId
+
+    return ""
 
 ########################################################
 doSignatureRPC = (func, args, type, c) ->
@@ -149,6 +184,7 @@ doSignatureRPC = (func, args, type, c) ->
     # in case of an error
     if response.error then throw new RPCError(func, response.error)
 
+    if c.requestingNodeId then c.serverId = await extractServerId(response) 
     await authenticateServiceSignature(response, requestId, serverId)
     
     return response.result 
@@ -164,6 +200,8 @@ doNoAuthRPC = (func, args, c) ->
     # olog response
     
     if response.error then throw new RPCError(response.error)
+
+    if c.requestingNodeId then c.serverId = await extractServerId(response) 
 
     return response.result 
 
@@ -185,6 +223,8 @@ doAnonymousRPC = (func, args, c) ->
     
     if response.error then throw new RPCError(response.error)
 
+    if c.requestingNodeId then c.serverId = await extractServerId(response) 
+
     return response.result 
 
 doPublicAccessRPC = (func, args, c) ->
@@ -205,9 +245,11 @@ doPublicAccessRPC = (func, args, c) ->
     response = await postRPCString(c.serverURL, requestString)
     # olog response
 
+    if response.error then throw new RPCError(response.error)
+
+    if c.requestingNodeId then c.serverId = await extractServerId(response) 
     authenticateServiceStatement(response, requestId, serverId)
 
-    if response.error then throw new RPCError(response.error)
     return response.result 
 
 #endregion
@@ -239,15 +281,42 @@ doTokenSimpleRPC = (func, args, c) ->
         if corruptSession then c.sessions[TOKEN_SIMPLE] = null
         throw new RPCError(func, response.error)
 
+    if c.requestingNodeId then c.serverId = await extractServerId(response) 
     await authenticateServiceStatement(response, requestId, serverId)
+
     return response.result 
 
 doTokenUniqueRPC  = (func, args, c) ->
     throw new Error("doTokenUniqueRPC: Not Implemented yet!")
-    # await establishUniqueTokenSession(c)
-    # incRequestId(c)
+    await establishUniqueTokenSession(c)
+    incRequestId(c)
 
-    return
+    type = "tokenUnique"
+    clientId = await c.getPublicKey()
+    requestId = c.requestId
+    name = c.name
+    timestamp = validatableStamp.create()
+    uniqueBytes = c.sessions[TOKEN_UNIQUE].generator.generate(timestamp)
+    requestToken = tbut.bytesToHex(uniqueBytes)
+
+    auth = { type, clientId, name, requestId, timestamp, requestToken }
+    rpcRequest = { auth, func, args }
+    requestString = JSON.stringify(rpcRequest)
+
+    serverId = await c.getServerId()
+    response = await postRPCString(c.serverURL, requestString)
+    # olog { response }
+
+    # in case of an error
+    if response.error
+        corruptSession = response.error.code? and response.error.code == NOT_AUTHORIZED
+        if corruptSession then c.sessions[TOKEN_UNIQUE] = null
+        throw new RPCError(func, response.error)
+
+    if c.requestingNodeId then c.serverId = await extractServerId(response) 
+    await authenticateServiceStatement(response, requestId, serverId)
+
+    return response.result 
 
 doAuthCodeSHA2RPC = (func, args, c) ->
     await establishSHA2AuthCodeSession(c)    
@@ -280,6 +349,7 @@ doAuthCodeSHA2RPC = (func, args, c) ->
         if corruptSession then c.sessions[AUTHCODE_SHA2] = null
         throw new RPCError(func, response.error)
 
+    if c.requestingNodeId then c.serverId = await extractServerId(response) 
     await authenticateServiceAuthCodeSHA2(response, requestId, serverId, c)
     
     return response.result 
@@ -317,7 +387,7 @@ establishSimpleTokenSession = (c) ->
         throw new Error(message)
     return
 
-generateExplicitAuthCodeSeed = (timestamp, c) ->
+generateSharedSecretSeed = (timestamp, c) ->
     serverContext = c.serverContext
     specificContext = c.name
     context = "#{specificContext}:#{serverContext}_#{timestamp}"
@@ -326,21 +396,30 @@ generateExplicitAuthCodeSeed = (timestamp, c) ->
 getExplicitSimpleToken = (c) ->
     return startSessionExplicitly("tokenSimple", c)
 
+establishUniqueTokenSession = (c) ->
+    if c.sessions[TOKEN_UNIQUE]? and c.sessions[TOKEN_UNIQUE].seedHex? then return
+    try
+        session = {}
+        timestamp = await startSessionExplicitly("tokenUnique", c)
+        seedBytes = tbut.hexToBytes(await generateSharedSecretSeed(timestamp, c))
+        session.generator = new Generator(seedBytes)
+        
+        c.sessions[TOKEN_UNIQUE] = session
+    catch err
+        message = "Could not establish a unique Token session! Details: #{err.message}"
+        throw new Error(message)
+    return
+
 establishSHA2AuthCodeSession = (c) ->
     if c.sessions[AUTHCODE_SHA2]? and c.sessions[AUTHCODE_SHA2].seedHex? then return
     try
         session = {}
         timestamp = await startSessionExplicitly("authCodeSHA2", c)
-        session.seedHex = await generateExplicitAuthCodeSeed(timestamp, c)
+        session.seedHex = await generateSharedSecretSeed(timestamp, c)
 
-        # if c.implicitSessions
-        #     session.seedHex = await generateImplicitAuthCodeSeed(c)
-        # else
-        #     timestamp = await startSessionExplicitly("authCodeSHA2", c)
-        #     session.seedHex = await generateExplicitAuthCodeSeed(timestamp, c)
         c.sessions[AUTHCODE_SHA2] = session
     catch err
-        message = "Could not establish a simple Token session! Details: #{err.message}"
+        message = "Could not establish an authCode with SHA2 session! Details: #{err.message}"
         throw new Error(message)
     return
 
