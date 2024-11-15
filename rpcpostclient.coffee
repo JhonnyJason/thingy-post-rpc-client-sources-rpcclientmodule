@@ -90,7 +90,7 @@ export class RPCPostClient
         func = "getNodeId"
         args =  {} 
         try await @doRPC(func, args, authType)
-        finally 
+        finally
             @requestingNodeId = false
         return
 
