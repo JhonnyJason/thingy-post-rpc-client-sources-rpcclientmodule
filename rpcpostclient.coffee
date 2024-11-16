@@ -86,10 +86,17 @@ export class RPCPostClient
 
     ########################################################
     requestNodeId: (authType) ->
+        if @requestingNodeId then throw new Error("Request for nodeId already pending!")
+        
+        if authType == "tokenSimple" or authType == "tokenUnique" or authType == "authCodeSHA2" then throw new Error("Requesting nodeId inside session - don't do this!")
+
+
         @requestingNodeId = true
         func = "getNodeId"
         args =  {} 
-        try await @doRPC(func, args, authType)
+        try 
+            result = await @doRPC(func, args, authType)
+            @serverId = result.nodeId
         finally
             @requestingNodeId = false
         return
@@ -100,7 +107,7 @@ export class RPCPostClient
 ########################################################
 randomPostfix = ->
     rand = Math.random()
-    return Math.round(rand * 1000)
+    return Math.round(rand * 1000000)
 
 ########################################################
 postRPCString = (url, requestString) ->
@@ -110,7 +117,6 @@ postRPCString = (url, requestString) ->
         body: requestString
         headers:
             'Content-Type': 'application/json'
-
     try
         response = await fetch(url, options)
         return await response.json()
@@ -119,14 +125,15 @@ postRPCString = (url, requestString) ->
         statusText = "No http-status could be provided!"        
         try
             statusText = "HTTP-Status: #{response.status}"
-            bodyText = "Body:  #{await response.text()}"
+
+            # bodyText = "Body:  #{await response.text()}"
         catch err2
-            details = "No response could be retrieved! details: #{err.message}"
-            errorMsg = "#{baseMsg} #{statusText} #{details}" 
+            details = "No response could be retrieved!\nMessage: #{err.message}\nCause: #{err.cause}"
+            errorMsg = "#{baseMsg} \n#{statusText} \n#{details}" 
             throw new NetworkError(errorMsg)
 
-        details = "#{statusText} #{bodyText}"
-        errorMsg = "#{baseMsg} #{details}"
+        details = "#{statusText} \nMessage: #{err.message} \nCause: #{err.cause}"
+        errorMsg = "#{baseMsg} \n#{details}"
         throw new NetworkError(errorMsg)
     return
 
@@ -137,27 +144,6 @@ incRequestId = (c) ->
 
 ########################################################
 #region RPC execution functions
-
-########################################################
-extractServerId = (response) ->
-    result = response.result
-
-    if typeof result == "object" and result.serverNodeId?
-        validatableStamp.assertValidity(result.timestamp)
-
-        nodeId = result.serverNodeId
-        sig = result.signature
-        result.signature = ""
-        content = JSON.stringify(result)
-        verified = await secUtl.verify(sig, nodeId, content)
-        if !verified then throw new Error("ServerId validation Failed: Invalid Signature!")
-
-        return nodeId
-
-    if response.auth? and response.auth.serverId?
-        return response.auth.serverId
-
-    return ""
 
 ########################################################
 doSignatureRPC = (func, args, type, c) ->
@@ -172,7 +158,7 @@ doSignatureRPC = (func, args, type, c) ->
     auth = { type, clientId, name, requestId, timestamp, signature }
     rpcRequest = { auth, func, args }
 
-    serverId = await c.getServerId()
+    serverId = await c.getServerId() unless c.requestingNodeId
     requestString = JSON.stringify(rpcRequest)
     sigHex = await secUtl.createSignature(requestString, c.secretKeyHex)
     requestString = requestString.replace('"signature":""', '"signature":"'+sigHex+'"')
@@ -184,7 +170,7 @@ doSignatureRPC = (func, args, type, c) ->
     # in case of an error
     if response.error then throw new RPCError(func, response.error)
 
-    if c.requestingNodeId then c.serverId = await extractServerId(response) 
+    if c.requestingNodeId then serverId = response.result.serverNodeId
     await authenticateServiceSignature(response, requestId, serverId)
     
     return response.result 
@@ -193,15 +179,13 @@ doSignatureRPC = (func, args, type, c) ->
 #region public RPCs
 doNoAuthRPC = (func, args, c) ->
     auth = null
-    requestString = JSON.stringify({ auth, func, args })
-    serverId = c.serverId
+    rpcRequest = { auth, func, args }
+    requestString = JSON.stringify(rpcRequest)
 
     response = await postRPCString(c.serverURL, requestString)
     # olog response
     
     if response.error then throw new RPCError(response.error)
-
-    if c.requestingNodeId then c.serverId = await extractServerId(response) 
 
     return response.result 
 
@@ -214,16 +198,13 @@ doAnonymousRPC = (func, args, c) ->
     requestToken = c.anonymousToken
 
     auth = { type, requestId, timestamp, requestToken }
-    
-    requestString = JSON.stringify({ auth, func, args })
-    serverId = c.serverId
+    rpcRequest = { auth, func, args }
+    requestString = JSON.stringify(rpcRequest)
 
     response = await postRPCString(c.serverURL, requestString)
     # olog response
-    
-    if response.error then throw new RPCError(response.error)
 
-    if c.requestingNodeId then c.serverId = await extractServerId(response) 
+    if response.error then throw new RPCError(response.error)
 
     return response.result 
 
@@ -235,19 +216,18 @@ doPublicAccessRPC = (func, args, c) ->
     clientId = await c.getPublicKey()
     timestamp = validatableStamp.create()
     requestToken = c.publicToken
+
     auth = { type, clientId, requestId, timestamp, requestToken }
+    rpcRequest = { auth, func, args }
+    requestString = JSON.stringify(rpcRequest)
 
-    # olog auth
-
-    requestString = JSON.stringify({ auth, func, args })
-    serverId = c.serverId
-
+    serverId = await c.getServerId() unless c.requestingNodeId
     response = await postRPCString(c.serverURL, requestString)
     # olog response
 
     if response.error then throw new RPCError(response.error)
 
-    if c.requestingNodeId then c.serverId = await extractServerId(response) 
+    if c.requestingNodeId then serverId = response.result.nodeId 
     authenticateServiceStatement(response, requestId, serverId)
 
     return response.result 
@@ -257,7 +237,7 @@ doPublicAccessRPC = (func, args, c) ->
 ########################################################
 #region session RPCs
 doTokenSimpleRPC = (func, args, c) ->
-    await establishSimpleTokenSession(c)    
+    await establishSimpleTokenSession(c)
     incRequestId(c)
 
     type = "tokenSimple"
@@ -281,7 +261,6 @@ doTokenSimpleRPC = (func, args, c) ->
         if corruptSession then c.sessions[TOKEN_SIMPLE] = null
         throw new RPCError(func, response.error)
 
-    if c.requestingNodeId then c.serverId = await extractServerId(response) 
     await authenticateServiceStatement(response, requestId, serverId)
 
     return response.result 
@@ -313,7 +292,6 @@ doTokenUniqueRPC  = (func, args, c) ->
         if corruptSession then c.sessions[TOKEN_UNIQUE] = null
         throw new RPCError(func, response.error)
 
-    if c.requestingNodeId then c.serverId = await extractServerId(response) 
     await authenticateServiceStatement(response, requestId, serverId)
 
     return response.result 
@@ -349,7 +327,6 @@ doAuthCodeSHA2RPC = (func, args, c) ->
         if corruptSession then c.sessions[AUTHCODE_SHA2] = null
         throw new RPCError(func, response.error)
 
-    if c.requestingNodeId then c.serverId = await extractServerId(response) 
     await authenticateServiceAuthCodeSHA2(response, requestId, serverId, c)
     
     return response.result 
