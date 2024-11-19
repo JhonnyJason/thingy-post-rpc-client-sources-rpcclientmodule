@@ -170,7 +170,7 @@ doSignatureRPC = (func, args, type, c) ->
     # in case of an error
     if response.error then throw new RPCError(func, response.error)
 
-    if c.requestingNodeId then serverId = response.result.serverNodeId
+    if c.requestingNodeId then serverId = response.result.nodeId
     await authenticateServiceSignature(response, requestId, serverId)
     
     return response.result 
